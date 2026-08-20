@@ -1,0 +1,7 @@
+opencv-python-headless
+ultralytics
+fast-plate-ocr
+streamlit
+numpy
+pandas
+torch
