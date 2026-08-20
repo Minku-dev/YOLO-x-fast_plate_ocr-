@@ -5,6 +5,7 @@ streamlit
 numpy
 pandas
 torch
-fast-plate-ocr[onnx]
+fast-plate-ocr
 time
 os
+onnxruntime
