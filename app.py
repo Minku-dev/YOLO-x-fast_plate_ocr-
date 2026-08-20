@@ -13,17 +13,8 @@ import torch
 
 st.set_page_config(page_title="License plate detect and OCR", layout="wide")
 
-try:
-    from ultralytics import YOLO
-except Exception as e:  # pragma: no cover
-    YOLO = None
-    _yolo_import_error = e
-
-try:
-    from fast_plate_ocr import LicensePlateRecognizer
-except Exception as e:  # pragma: no cover
-    LicensePlateRecognizer = None
-    _ocr_import_error = e
+from ultralytics import YOLO
+from fast_plate_ocr import LicensePlateRecognizer
 
 
 MIN_HEIGHT = 10
@@ -114,9 +105,9 @@ def process_video(
     progress_callback=None,
 ):
     if YOLO is None:
-        raise RuntimeError(f"Khong the import ultralytics.YOLO: {_yolo_import_error}")
+        raise RuntimeError(f"Không import đc ultralytics.YOLO: {_yolo_import_error}")
     if LicensePlateRecognizer is None:
-        raise RuntimeError(f"Khong the import fast_plate_ocr: {_ocr_import_error}")
+        raise RuntimeError(f"Không import đc fast_plate_ocr: {_ocr_import_error}")
 
     model = load_yolo_model(yolo_weights)
     engine = load_ocr_engine(ocr_model_name)
@@ -125,7 +116,7 @@ def process_video(
 
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
-        raise ValueError(f"Khong the mo video: {input_path}")
+        raise ValueError(f"Không thể mở video: {input_path}")
 
     src_fps = cap.get(cv2.CAP_PROP_FPS)
     if not src_fps or src_fps <= 1:
@@ -135,7 +126,7 @@ def process_video(
 
     ret, frame = cap.read()
     if not ret:
-        raise ValueError("Khong doc duoc frame dau tien")
+        raise ValueError("Không đọc được frame")
 
     height, width = frame.shape[:2]
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
