@@ -56,7 +56,7 @@ def adjust_brightness_contrast(frame):
 
 
 def preprocess_license_plate(frame):
-    if not check_image_size(frame):
+    if not check_frame_size(frame):
         return None
     frame = adjust_brightness_contrast(frame)
     frame = correct_skew(frame)
@@ -175,7 +175,7 @@ def process_video(
                 x_br_safe = min(frame.shape[1], x_br)
                 plate_region = frame[y_tl_safe:y_br_safe, x_tl_safe:x_br_safe]
 
-                if plate_region.size == 0 or not check_image_size(plate_region):
+                if plate_region.size == 0 or not check_frame_size(plate_region):
                     continue
 
                 if enable_preprocess:
@@ -319,7 +319,7 @@ if run_button and uploaded_video is not None and yolo_weights_file is not None:
         with open(yolo_weights_path, "wb") as f:
             f.write(yolo_weights_file.read())
 
-        progress_bar = st.progress(0.0, text="Đang xử lý...")
+        progress_bar = st.progress(0.0, text="Đang xử lý")
         status_text = st.empty()
 
         def _on_progress(frame_count, total_frames):
@@ -330,7 +330,7 @@ if run_button and uploaded_video is not None and yolo_weights_file is not None:
                 status_text.write(f"Đang xử lý frame {frame_count}...")
 
         try:
-            with st.spinner("Đang chạy pipeline detect + OCR..."):
+            with st.spinner("Đang chạy pipeline detect + OCR"):
                 perf_rows, summary = process_video(
                     input_path=input_path,
                     output_path=output_path,
