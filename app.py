@@ -21,13 +21,13 @@ MIN_HEIGHT = 10
 MIN_WIDTH = 10
 
 
-def check_image_size(image):
-    height, width = image.shape[:2]
+def check_frame_size(frame):
+    height, width = frame.shape[:2]
     return width >= MIN_WIDTH and height >= MIN_HEIGHT
 
 
-def correct_skew(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+def correct_skew(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
     lines = cv2.HoughLines(edges, 1, np.pi / 180, 100)
@@ -35,32 +35,32 @@ def correct_skew(image):
         rho, theta = lines[0][0]
         angle = (theta * 180 / np.pi) - 90
         if abs(angle) > 5:
-            h, w = image.shape[:2]
+            h, w = frame.shape[:2]
             M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
-            image = cv2.warpAffine(
-                image, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE
+            frame = cv2.warpAffine(
+                frame, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE
             )
-    return image
+    return frame
 
 
-def adjust_brightness_contrast(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+def adjust_brightness_contrast(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     mean_brightness = np.mean(gray)
     if mean_brightness < 50 or mean_brightness > 200:
-        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
         l = cv2.equalizeHist(l)
         lab = cv2.merge((l, a, b))
-        image = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-    return image
+        frame = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    return frame
 
 
-def preprocess_license_plate(image):
-    if not check_image_size(image):
+def preprocess_license_plate(frame):
+    if not check_image_size(frame):
         return None
-    image = adjust_brightness_contrast(image)
-    image = correct_skew(image)
-    return image
+    frame = adjust_brightness_contrast(frame)
+    frame = correct_skew(frame)
+    return frame
 
 
 def normalize_plate_text(text):
