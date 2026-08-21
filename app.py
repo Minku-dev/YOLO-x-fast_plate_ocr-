@@ -105,9 +105,9 @@ def process_video(
     progress_callback=None,
 ):
     if YOLO is None:
-        raise RuntimeError(f"Không import đc ultralytics.YOLO: {_yolo_import_error}")
+        raise RuntimeError(f"Không import đc ultralytics.YOLO")
     if LicensePlateRecognizer is None:
-        raise RuntimeError(f"Không import đc fast_plate_ocr: {_ocr_import_error}")
+        raise RuntimeError(f"Không import đc fast_plate_ocr")
 
     model = load_yolo_model(yolo_weights)
     engine = load_ocr_engine(ocr_model_name)
