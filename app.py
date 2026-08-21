@@ -286,7 +286,7 @@ with st.sidebar:
     ocr_model_name = st.text_input("Phiên bản OCR (fast-plate-ocr)", value="cct-s-v2-global-model")
 
     st.header("Tham số detect")
-    det_conf_thres = st.slider("Ngưỡng tin cậy", 0.0, 1.0, 0.0, 0.01)
+    det_conf_thres = st.slider("Ngưỡng tin cậy", 0.0, 1.0, 0.25, 0.01)
     high_conf_thres = st.slider("Ngưỡng tin cậy cao ", 0.0, 1.0, 0.5, 0.01)
     enable_preprocess = st.checkbox("Bật tiền xử lí ảnh", value=False)
 
