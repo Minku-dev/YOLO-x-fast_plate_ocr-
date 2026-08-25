@@ -79,7 +79,7 @@ def load_ground_truth_from_bytes(file_bytes):
     return truth
 
 
-#model loader
+# model loader
 
 @st.cache_resource(show_spinner="Đang tải model YOLO")
 def load_yolo_model(weights_path):
@@ -91,7 +91,188 @@ def load_ocr_engine(model_name):
     return LicensePlateRecognizer(model_name)
 
 
-#pipeline
+def _run_detect_ocr_on_frame(
+    frame,
+    frame_count,
+    model,
+    engine,
+    det_conf_thres,
+    enable_preprocess,
+    ground_truth,
+    has_ground_truth,
+):
+    """Chạy YOLO detect + OCR trên MỘT frame/ảnh, vẽ box + text lên frame (in-place).
+
+    Trả về: perf_rows (list dict), yolo_infer_ms, ocr_times_ms (list),
+    det_confs (list), ocr_texts (list), ocr_confs (list),
+    yolo_scored (0/1), yolo_correct (0/1), n_expected, n_ocr_correct
+    """
+    perf_rows = []
+    det_confs = []
+    ocr_texts = []
+    ocr_confs = []
+    ocr_times_ms = []
+
+    results = model.predict(frame, conf=det_conf_thres, verbose=False)
+
+    yolo_infer_ms = 0.0
+    yolo_scored = 0
+    yolo_correct = 0
+    n_expected = 0
+    n_ocr_correct = 0
+
+    for r in results:
+        boxes = r.boxes
+        yolo_infer_ms = r.speed.get("inference", 0.0)
+
+        frame_ocr_texts = []
+
+        for box in boxes:
+            det_conf = float(box.conf[0])
+            det_confs.append(det_conf)
+            x_tl, y_tl, x_br, y_br = box.xyxy[0].to(torch.int64).tolist()
+
+            cv2.rectangle(frame, (x_tl, y_tl), (x_br, y_br), (0, 255, 0), 2)
+
+            y_tl_safe = max(0, y_tl)
+            y_br_safe = min(frame.shape[0], y_br)
+            x_tl_safe = max(0, x_tl)
+            x_br_safe = min(frame.shape[1], x_br)
+            plate_region = frame[y_tl_safe:y_br_safe, x_tl_safe:x_br_safe]
+
+            if plate_region.size == 0 or not check_frame_size(plate_region):
+                continue
+
+            if enable_preprocess:
+                processed = preprocess_license_plate(plate_region)
+                if processed is None:
+                    continue
+                plate_region = processed
+
+            plate_array = cv2.cvtColor(plate_region, cv2.COLOR_BGR2RGB)
+
+            ocr_conf = None
+            ocr_start = time.perf_counter()
+            try:
+                pred = engine.run_one(plate_array, return_confidence=True)
+                concat_number = pred.plate if pred.plate else "Not recognized"
+                if pred.char_probs is not None and len(pred.char_probs) > 0:
+                    ocr_conf = float(np.mean(pred.char_probs))
+            except Exception:
+                concat_number = "Error"
+            ocr_infer_ms = (time.perf_counter() - ocr_start) * 1000
+            ocr_times_ms.append(ocr_infer_ms)
+
+            ocr_texts.append(concat_number)
+            if ocr_conf is not None:
+                ocr_confs.append(ocr_conf)
+            frame_ocr_texts.append(concat_number)
+
+            cv2.putText(
+                img=frame,
+                text=concat_number,
+                org=(x_tl, max(0, y_tl - 10)),
+                fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                fontScale=0.6,
+                color=(0, 255, 0),
+                thickness=2,
+            )
+
+            perf_rows.append({
+                "frame": frame_count,
+                "plate_text": concat_number,
+                "det_conf": round(det_conf, 4),
+                "ocr_conf": round(ocr_conf, 4) if ocr_conf is not None else "",
+                "yolo_ms": round(yolo_infer_ms, 3),
+                "ocr_ms": round(ocr_infer_ms, 3),
+            })
+
+        if has_ground_truth and frame_count in ground_truth:
+            expected = list(ground_truth[frame_count])
+
+            yolo_scored = 1
+            if len(boxes) == len(expected):
+                yolo_correct = 1
+
+            remaining = expected.copy()
+            for txt in frame_ocr_texts:
+                norm = normalize_plate_text(txt)
+                if norm in remaining:
+                    remaining.remove(norm)
+                    n_ocr_correct += 1
+            n_expected = len(expected)
+
+    return (
+        perf_rows, yolo_infer_ms, ocr_times_ms, det_confs, ocr_texts, ocr_confs,
+        yolo_scored, yolo_correct, n_expected, n_ocr_correct,
+    )
+
+
+# pipeline
+def process_image(
+    input_img_path,
+    output_img_path,
+    yolo_weights,
+    ocr_model_name,
+    det_conf_thres,
+    high_conf_thres,
+    enable_preprocess,
+    ground_truth,
+    progress_callback=None,
+):
+    if YOLO is None:
+        raise RuntimeError("Không import đc ultralytics.YOLO")
+    if LicensePlateRecognizer is None:
+        raise RuntimeError("Không import đc fast_plate_ocr")
+
+    model = load_yolo_model(yolo_weights)
+    engine = load_ocr_engine(ocr_model_name)
+
+    has_ground_truth = len(ground_truth) > 0
+
+    frame = cv2.imread(input_img_path)
+    if frame is None:
+        raise ValueError(f"Không đọc được ảnh: {input_img_path}")
+
+    run_start = time.perf_counter()
+
+    frame_count = 1  # coi ảnh như 1 "frame" duy nhất, để khớp cột frame trong ground truth
+
+    (
+        perf_rows, yolo_infer_ms, ocr_times_ms, det_confs, ocr_texts, ocr_confs,
+        yolo_scored, yolo_correct, n_expected, n_ocr_correct,
+    ) = _run_detect_ocr_on_frame(
+        frame, frame_count, model, engine, det_conf_thres, enable_preprocess,
+        ground_truth, has_ground_truth,
+    )
+
+    if progress_callback is not None:
+        progress_callback(1, 1)
+
+    cv2.imwrite(output_img_path, frame)
+
+    total_time_s = time.perf_counter() - run_start
+
+    summary = {
+        "frame_count": 1,
+        "total_time_s": total_time_s,
+        "plate_count": len(ocr_texts),
+        "yolo_times_ms": [yolo_infer_ms] if yolo_infer_ms else [],
+        "ocr_times_ms": ocr_times_ms,
+        "frame_times_ms": [total_time_s * 1000],
+        "all_det_confs": det_confs,
+        "all_ocr_texts": ocr_texts,
+        "ocr_confs": ocr_confs,
+        "has_ground_truth": has_ground_truth,
+        "yolo_scored_frames": yolo_scored,
+        "yolo_correct_frames": yolo_correct,
+        "ocr_total_expected": n_expected,
+        "ocr_correct": n_ocr_correct,
+        "high_conf_thres": high_conf_thres,
+    }
+
+    return perf_rows, summary
+
 
 def process_video(
     input_path,
@@ -105,9 +286,9 @@ def process_video(
     progress_callback=None,
 ):
     if YOLO is None:
-        raise RuntimeError(f"Không import đc ultralytics.YOLO")
+        raise RuntimeError("Không import đc ultralytics.YOLO")
     if LicensePlateRecognizer is None:
-        raise RuntimeError(f"Không import đc fast_plate_ocr")
+        raise RuntimeError("Không import đc fast_plate_ocr")
 
     model = load_yolo_model(yolo_weights)
     engine = load_ocr_engine(ocr_model_name)
@@ -153,90 +334,27 @@ def process_video(
             break
         frame_count += 1
 
-        results = model.predict(frame, conf=det_conf_thres, verbose=False)
+        (
+            rows, yolo_infer_ms, ocr_ms_list, det_confs, ocr_texts, ocr_confs_frame,
+            yolo_scored, yolo_correct, n_expected, n_ocr_correct,
+        ) = _run_detect_ocr_on_frame(
+            frame, frame_count, model, engine, det_conf_thres, enable_preprocess,
+            ground_truth, has_ground_truth,
+        )
 
-        for r in results:
-            boxes = r.boxes
-            yolo_infer_ms = r.speed.get("inference", 0.0)
+        perf_rows.extend(rows)
+        if yolo_infer_ms:
             yolo_times_ms.append(yolo_infer_ms)
+        ocr_times_ms.extend(ocr_ms_list)
+        all_det_confs.extend(det_confs)
+        all_ocr_texts.extend(ocr_texts)
+        ocr_confs.extend(ocr_confs_frame)
+        plate_count += len(ocr_texts)
 
-            frame_ocr_texts = []
-
-            for box in boxes:
-                det_conf = float(box.conf[0])
-                all_det_confs.append(det_conf)
-                x_tl, y_tl, x_br, y_br = box.xyxy[0].to(torch.int64).tolist()
-
-                cv2.rectangle(frame, (x_tl, y_tl), (x_br, y_br), (0, 255, 0), 2)
-
-                y_tl_safe = max(0, y_tl)
-                y_br_safe = min(frame.shape[0], y_br)
-                x_tl_safe = max(0, x_tl)
-                x_br_safe = min(frame.shape[1], x_br)
-                plate_region = frame[y_tl_safe:y_br_safe, x_tl_safe:x_br_safe]
-
-                if plate_region.size == 0 or not check_frame_size(plate_region):
-                    continue
-
-                if enable_preprocess:
-                    processed = preprocess_license_plate(plate_region)
-                    if processed is None:
-                        continue
-                    plate_region = processed
-
-                plate_array = cv2.cvtColor(plate_region, cv2.COLOR_BGR2RGB)
-
-                ocr_conf = None
-                ocr_start = time.perf_counter()
-                try:
-                    pred = engine.run_one(plate_array, return_confidence=True)
-                    concat_number = pred.plate if pred.plate else "Not recognized"
-                    if pred.char_probs is not None and len(pred.char_probs) > 0:
-                        ocr_conf = float(np.mean(pred.char_probs))
-                except Exception:
-                    concat_number = "Error"
-                ocr_infer_ms = (time.perf_counter() - ocr_start) * 1000
-                ocr_times_ms.append(ocr_infer_ms)
-                plate_count += 1
-
-                all_ocr_texts.append(concat_number)
-                if ocr_conf is not None:
-                    ocr_confs.append(ocr_conf)
-                frame_ocr_texts.append(concat_number)
-
-                cv2.putText(
-                    img=frame,
-                    text=concat_number,
-                    org=(x_tl, max(0, y_tl - 10)),
-                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=0.6,
-                    color=(0, 255, 0),
-                    thickness=2,
-                )
-
-                perf_rows.append({
-                    "frame": frame_count,
-                    "plate_text": concat_number,
-                    "det_conf": round(det_conf, 4),
-                    "ocr_conf": round(ocr_conf, 4) if ocr_conf is not None else "",
-                    "yolo_ms": round(yolo_infer_ms, 3),
-                    "ocr_ms": round(ocr_infer_ms, 3),
-                })
-
-            if has_ground_truth and frame_count in ground_truth:
-                expected = list(ground_truth[frame_count])
-
-                yolo_scored_frames += 1
-                if len(boxes) == len(expected):
-                    yolo_correct_frames += 1
-
-                remaining = expected.copy()
-                for txt in frame_ocr_texts:
-                    norm = normalize_plate_text(txt)
-                    if norm in remaining:
-                        remaining.remove(norm)
-                        ocr_correct += 1
-                ocr_total_expected += len(expected)
+        yolo_scored_frames += yolo_scored
+        yolo_correct_frames += yolo_correct
+        ocr_total_expected += n_expected
+        ocr_correct += n_ocr_correct
 
         frame_ms = (time.perf_counter() - frame_start) * 1000
         frame_times_ms.append(frame_ms)
@@ -276,8 +394,6 @@ def process_video(
     return perf_rows, summary
 
 
-
-
 st.title("Nhận diện biển số xe")
 
 with st.sidebar:
@@ -293,77 +409,124 @@ with st.sidebar:
     st.header("Tải Ground truth (.csv)")
     gt_file = st.file_uploader("File CSV ground truth (cột: frame, plate_text)", type=["csv"])
 
-uploaded_video = st.file_uploader("Tải lên video để xử lý", type=["mp4", "avi", "mov", "mkv"])
+input_mode = st.radio("Loại đầu vào", ["Video", "Ảnh"], horizontal=True)
+
+uploaded_video = None
+uploaded_image = None
+
+if input_mode == "Video":
+    uploaded_video = st.file_uploader("Tải lên video để xử lý", type=["mp4", "avi", "mov", "mkv"])
+    input_ready = uploaded_video is not None
+else:
+    uploaded_image = st.file_uploader("Tải lên ảnh để xử lý", type=["jpg", "jpeg", "png", "bmp"])
+    input_ready = uploaded_image is not None
 
 run_button = st.button(
-    "RUN", type="primary", disabled=uploaded_video is None or yolo_weights_file is None
+    "RUN", type="primary", disabled=(not input_ready) or yolo_weights_file is None
 )
 
-if uploaded_video is not None and yolo_weights_file is None:
+if input_ready and yolo_weights_file is None:
     st.warning("Tải lên file trọng số YOLO (.pt) ở sidebar trước khi chạy.")
 
 if "anpr_results" not in st.session_state:
     st.session_state["anpr_results"] = None
 
-if run_button and uploaded_video is not None and yolo_weights_file is not None:
+if run_button and input_ready and yolo_weights_file is not None:
     ground_truth = load_ground_truth_from_bytes(gt_file.read()) if gt_file is not None else defaultdict(list)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = os.path.join(tmpdir, "input_video")
-        output_path = os.path.join(tmpdir, "output_video.mp4")
         yolo_weights_path = os.path.join(tmpdir, "weights.pt")
-
-        with open(input_path, "wb") as f:
-            f.write(uploaded_video.read())
-
         with open(yolo_weights_path, "wb") as f:
             f.write(yolo_weights_file.read())
 
-        progress_bar = st.progress(0.0, text="Đang xử lý")
-        status_text = st.empty()
+        if input_mode == "Video":
+            input_path = os.path.join(tmpdir, "input_video")
+            output_path = os.path.join(tmpdir, "output_video.mp4")
 
-        def _on_progress(frame_count, total_frames):
-            if total_frames:
-                pct = min(frame_count / total_frames, 1.0)
-                progress_bar.progress(pct, text=f"Đang xử lý frame {frame_count}/{total_frames}")
-            else:
-                status_text.write(f"Đang xử lý frame {frame_count}...")
+            with open(input_path, "wb") as f:
+                f.write(uploaded_video.read())
 
-        try:
-            with st.spinner("Đang chạy pipeline detect + OCR"):
-                perf_rows, summary = process_video(
-                    input_path=input_path,
-                    output_path=output_path,
-                    yolo_weights=yolo_weights_path,
-                    ocr_model_name=ocr_model_name,
-                    det_conf_thres=det_conf_thres,
-                    high_conf_thres=high_conf_thres,
-                    enable_preprocess=enable_preprocess,
-                    ground_truth=ground_truth,
-                    progress_callback=_on_progress,
-                )
-        except Exception as e:
-            st.error(f"Lỗi khi xử lý file: {e}")
-            st.stop()
+            progress_bar = st.progress(0.0, text="Đang xử lý")
+            status_text = st.empty()
 
-        progress_bar.progress(1.0, text="Hoàn tất")
-        with open(output_path, "rb") as f:
-            video_bytes = f.read()
+            def _on_progress(frame_count, total_frames):
+                if total_frames:
+                    pct = min(frame_count / total_frames, 1.0)
+                    progress_bar.progress(pct, text=f"Đang xử lý frame {frame_count}/{total_frames}")
+                else:
+                    status_text.write(f"Đang xử lý frame {frame_count}...")
 
-        st.session_state["anpr_results"] = {
-            "perf_rows": perf_rows,
-            "summary": summary,
-            "video_bytes": video_bytes,
-        }
+            try:
+                with st.spinner("Đang chạy pipeline detect + OCR"):
+                    perf_rows, summary = process_video(
+                        input_path=input_path,
+                        output_path=output_path,
+                        yolo_weights=yolo_weights_path,
+                        ocr_model_name=ocr_model_name,
+                        det_conf_thres=det_conf_thres,
+                        high_conf_thres=high_conf_thres,
+                        enable_preprocess=enable_preprocess,
+                        ground_truth=ground_truth,
+                        progress_callback=_on_progress,
+                    )
+            except Exception as e:
+                st.error(f"Lỗi khi xử lý file: {e}")
+                st.stop()
+
+            progress_bar.progress(1.0, text="Hoàn tất")
+            with open(output_path, "rb") as f:
+                output_bytes = f.read()
+
+            st.session_state["anpr_results"] = {
+                "mode": "video",
+                "perf_rows": perf_rows,
+                "summary": summary,
+                "output_bytes": output_bytes,
+            }
+
+        else:
+            ext = os.path.splitext(uploaded_image.name)[1] or ".jpg"
+            input_path = os.path.join(tmpdir, f"input_image{ext}")
+            output_path = os.path.join(tmpdir, "output_image.jpg")
+
+            with open(input_path, "wb") as f:
+                f.write(uploaded_image.read())
+
+            try:
+                with st.spinner("Đang chạy pipeline detect + OCR"):
+                    perf_rows, summary = process_image(
+                        input_img_path=input_path,
+                        output_img_path=output_path,
+                        yolo_weights=yolo_weights_path,
+                        ocr_model_name=ocr_model_name,
+                        det_conf_thres=det_conf_thres,
+                        high_conf_thres=high_conf_thres,
+                        enable_preprocess=enable_preprocess,
+                        ground_truth=ground_truth,
+                    )
+            except Exception as e:
+                st.error(f"Lỗi khi xử lý file: {e}")
+                st.stop()
+
+            with open(output_path, "rb") as f:
+                output_bytes = f.read()
+
+            st.session_state["anpr_results"] = {
+                "mode": "image",
+                "perf_rows": perf_rows,
+                "summary": summary,
+                "output_bytes": output_bytes,
+            }
 
 results = st.session_state["anpr_results"]
 if results is not None:
+    mode = results.get("mode", "video")
     perf_rows = results["perf_rows"]
     summary = results["summary"]
-    video_bytes = results["video_bytes"]
+    output_bytes = results["output_bytes"]
 
     if True:
-        #Thống kê hiệu năng
+        # Thống kê hiệu năng
         st.subheader("Tổng quan hiệu năng")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Số frame đã xử lý", summary["frame_count"])
@@ -408,16 +571,28 @@ if results is not None:
             if summary["ocr_confs"]:
                 st.write(f"Độ tin cậy OCR trung bình: **{np.mean(summary['ocr_confs']) * 100:.2f}%**")
 
-        #Output video
-        st.subheader("Video kết quả")
-        st.download_button(
-            "Tải video kết quả (.mp4)",
-            data=video_bytes,
-            file_name="output_video.mp4",
-            mime="video/mp4",
-            key="download_video_btn",
-        )
-        #Bảng thống kê
+        # Output video/ảnh
+        if mode == "video":
+            st.subheader("Video kết quả")
+            st.download_button(
+                "Tải video kết quả (.mp4)",
+                data=output_bytes,
+                file_name="output_video.mp4",
+                mime="video/mp4",
+                key="download_video_btn",
+            )
+        else:
+            st.subheader("Ảnh kết quả")
+            st.image(output_bytes, channels="BGR", caption="Kết quả detect + OCR", use_container_width=True)
+            st.download_button(
+                "Tải ảnh kết quả (.jpg)",
+                data=output_bytes,
+                file_name="output_image.jpg",
+                mime="image/jpeg",
+                key="download_image_btn",
+            )
+
+        # Bảng thống kê
         st.subheader("Bảng các biển số đã nhận diện")
         if perf_rows:
             df = pd.DataFrame(perf_rows)
@@ -431,11 +606,11 @@ if results is not None:
                 key="download_csv_btn",
             )
         else:
-            st.write("Không phát hiện biển số nào trong video.")
+            st.write("Không phát hiện biển số nào.")
 
-        if st.button("Xoá kết quả và chạy video mới"):
+        if st.button("Xoá kết quả và chạy lại"):
             st.session_state["anpr_results"] = None
             st.rerun()
 
-elif uploaded_video is None:
-    st.info("Hãy tải video lên và nhấn 'RUN' để bắt đầu")
+elif not input_ready:
+    st.info("Hãy chọn loại đầu vào (Video/Ảnh), tải file lên và nhấn 'RUN' để bắt đầu")
