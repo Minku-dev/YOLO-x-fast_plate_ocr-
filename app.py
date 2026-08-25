@@ -101,12 +101,6 @@ def _run_detect_ocr_on_frame(
     ground_truth,
     has_ground_truth,
 ):
-    """Chạy YOLO detect + OCR trên MỘT frame/ảnh, vẽ box + text lên frame (in-place).
-
-    Trả về: perf_rows (list dict), yolo_infer_ms, ocr_times_ms (list),
-    det_confs (list), ocr_texts (list), ocr_confs (list),
-    yolo_scored (0/1), yolo_correct (0/1), n_expected, n_ocr_correct
-    """
     perf_rows = []
     det_confs = []
     ocr_texts = []
