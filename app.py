@@ -230,7 +230,7 @@ def process_image(
 
     run_start = time.perf_counter()
 
-    frame_count = 1  # coi ảnh như 1 "frame" duy nhất, để khớp cột frame trong ground truth
+    frame_count = 1  
 
     (
         perf_rows, yolo_infer_ms, ocr_times_ms, det_confs, ocr_texts, ocr_confs,
